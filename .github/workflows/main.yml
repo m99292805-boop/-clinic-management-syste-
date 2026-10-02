@@ -18,7 +18,6 @@ env:
   BUILD_TOOLS: "34.0.0"
   NODE_VERSION: "20"
   JAVA_VERSION: "17"
-  ANDROID_DIR: android
 
 jobs:
   build:
@@ -30,6 +29,26 @@ jobs:
       # 📥 1) جلب الكود
       - name: 📥 Checkout
         uses: actions/checkout@v4
+
+      # 🔎 تحديد مجلد المشروع تلقائياً
+      - name: 🔎 Locate project root
+        run: |
+          set -eu
+          DIR=""
+          while IFS= read -r f; do
+            d=$(dirname "$f")
+            if grep -q '"@capacitor/core"' "$f"; then DIR="$d"; break; fi
+          done < <(find . -name package.json -not -path "*/node_modules/*" -not -path "./.git/*" | sort)
+          if [ -z "$DIR" ]; then
+            echo "❌ لم أجد package.json (مشروع Capacitor) في المستودع. الملفات الموجودة:"
+            find . -maxdepth 3 -not -path "./.git/*" -not -path "*/node_modules/*" | sort | head -60
+            exit 1
+          fi
+          PROJECT_DIR=$(cd "$DIR" && pwd)
+          echo "PROJECT_DIR=$PROJECT_DIR"        >> "$GITHUB_ENV"
+          echo "ANDROID_DIR=$PROJECT_DIR/android" >> "$GITHUB_ENV"
+          echo "✅ Project root: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR" | head -30
 
       # 🟢 2) Node
       - name: 🟢 Setup Node
@@ -79,6 +98,7 @@ jobs:
       - name: 📦 Install dependencies (retry x3)
         run: |
           set -eo pipefail
+          cd "$PROJECT_DIR"
           for i in 1 2 3; do
             echo "▶ attempt $i"
             if [ -f package-lock.json ]; then npm ci && break; else npm install && break; fi
@@ -93,6 +113,7 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
         run: |
           set -euo pipefail
+          cd "$PROJECT_DIR"
           npm run build
           test -f dist/index.html || { echo "❌ dist/index.html missing"; exit 1; }
 
@@ -100,11 +121,11 @@ jobs:
       - name: 🔄 Capacitor sync
         run: |
           set -euo pipefail
+          cd "$PROJECT_DIR"
           [ -d "$ANDROID_DIR" ] || npx cap add android
           npx cap sync android
-          # ذاكرة أكبر لـ Gradle لتفادي انهيار البناء (OutOfMemory)
           echo "org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8" >> "$ANDROID_DIR/gradle.properties"
-          mkdir -p logs
+          mkdir -p "$GITHUB_WORKSPACE/logs"
 
       # 🔐 9) صلاحيات gradlew
       - name: 🔐 chmod gradlew
@@ -117,7 +138,7 @@ jobs:
         working-directory: ${{ env.ANDROID_DIR }}
         run: |
           set -o pipefail
-          ./gradlew clean --no-daemon --stacktrace 2>&1 | tee ../logs/clean.log
+          ./gradlew clean --no-daemon --stacktrace 2>&1 | tee $GITHUB_WORKSPACE/logs/clean.log
 
       # 🐞 11) APK Debug
       - name: 🐞 Build APK (debug)
@@ -125,7 +146,7 @@ jobs:
         run: |
           set -o pipefail
           for i in 1 2; do
-            ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee ../logs/apk-$i.log && exit 0
+            ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee $GITHUB_WORKSPACE/logs/apk-$i.log && exit 0
             echo "⚠️ attempt $i failed"; sleep 10
           done
           echo "❌ assembleDebug failed"; exit 1
@@ -136,7 +157,7 @@ jobs:
         run: |
           set -o pipefail
           for i in 1 2; do
-            ./gradlew bundleRelease --no-daemon --stacktrace 2>&1 | tee ../logs/aab-$i.log && exit 0
+            ./gradlew bundleRelease --no-daemon --stacktrace 2>&1 | tee $GITHUB_WORKSPACE/logs/aab-$i.log && exit 0
             echo "⚠️ attempt $i failed"; sleep 10
           done
           echo "❌ bundleRelease failed"; exit 1
@@ -168,16 +189,16 @@ jobs:
       - name: ✅ Verify outputs
         run: |
           set -euo pipefail
-          mkdir -p out
+          mkdir -p "$GITHUB_WORKSPACE/out"
           APK=$(find "$ANDROID_DIR" -name "*.apk" -path "*debug*" | head -n1)
           AAB=$(find "$ANDROID_DIR" -name "*.aab" -path "*release*" | head -n1)
           [ -n "$APK" ] && [ -s "$APK" ] || { echo "❌ APK missing/empty"; exit 1; }
           [ -n "$AAB" ] && [ -s "$AAB" ] || { echo "❌ AAB missing/empty"; exit 1; }
           unzip -tq "$APK" >/dev/null || { echo "❌ APK corrupt"; exit 1; }
           unzip -tq "$AAB" >/dev/null || { echo "❌ AAB corrupt"; exit 1; }
-          cp "$APK" out/clinic-debug.apk
-          cp "$AAB" out/clinic-release.aab
-          ls -lh out
+          cp "$APK" "$GITHUB_WORKSPACE/out/clinic-debug.apk"
+          cp "$AAB" "$GITHUB_WORKSPACE/out/clinic-release.aab"
+          ls -lh "$GITHUB_WORKSPACE/out"
           echo "✅ APK & AAB verified"
 
       # 🪵 15) سجلات الفشل
